@@ -8,10 +8,10 @@ cells = []
 cells.append(nbf.v4.new_markdown_cell("# Train SDXL LoRA for Bonnie (West Highland White Terrier)"))
 
 # Module 1: Environment & Accelerated Dependencies
-cell_1_code = """!pip install -q -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-!pip install -q -U accelerate transformers diffusers peft bitsandbytes xformers scikit-image opencv-python pillow nbformat datasets
+cell_1_code = """!pip install -U "pillow==10.4.0" "transformers==4.41.2" "diffusers>=0.30.0" "peft>=0.11.0" accelerate xformers bitsandbytes einops torchvision
 
 import os
+print("Dependencies installed. Please restart the Kaggle kernel session if required by library updates.")
 os.environ["ACCELERATE_USE_FP16"] = "true"
 os.environ["ACCELERATE_USE_XFORMERS"] = "true"
 os.environ["ACCELERATE_GRADIENT_CHECKPOINTING"] = "true"
@@ -53,7 +53,7 @@ cells.append(nbf.v4.new_code_cell(cell_2_code))
 cell_3_code = """import os
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from skimage.filters import unsharp_mask
 import shutil
 
@@ -99,19 +99,9 @@ def process_image(img_path, save_path):
 
     img_pil = Image.fromarray(img_np)
 
-    scale_w = target_w / w
-    scale_h = target_h / h
-    scale = max(scale_w, scale_h)
+    # Pad to target dimensions while preserving aspect ratio
+    img_pil = ImageOps.pad(img_pil, (target_w, target_h), method=Image.BICUBIC, color=(0, 0, 0))
 
-    resize_w, resize_h = int(w * scale), int(h * scale)
-    img_pil = img_pil.resize((resize_w, resize_h), Image.BICUBIC)
-
-    left = (resize_w - target_w) / 2
-    top = (resize_h - target_h) / 2
-    right = (resize_w + target_w) / 2
-    bottom = (resize_h + target_h) / 2
-
-    img_pil = img_pil.crop((left, top, right, bottom))
     img_pil.save(save_path, format="JPEG", quality=95)
     print(f"Processed {os.path.basename(img_path)} -> {target_w}x{target_h}")
 
@@ -136,13 +126,23 @@ import json
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM
+from unittest.mock import patch
+from transformers.dynamic_module_utils import get_imports
+
+def patched_get_imports(filename):
+    imports = get_imports(filename)
+    if "flash_attn" in imports:
+        imports.remove("flash_attn")
+    return imports
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model_id = "microsoft/Florence-2-base"
 
 dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True).to(device)
-processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+with patch("transformers.dynamic_module_utils.get_imports", patched_get_imports):
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, trust_remote_code=True).to(device)
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
 processed_dir = "dataset/processed"
 metadata_path = "dataset/processed/metadata.jsonl"
@@ -198,7 +198,7 @@ else:
     print("Processed directory not found. Please run preprocessing step first.")
 
 # Cleanup VRAM
-del model
+del model, processor
 torch.cuda.empty_cache()
 """
 cells.append(nbf.v4.new_code_cell(cell_4_code))
@@ -314,7 +314,7 @@ cells.append(nbf.v4.new_code_cell(cell_7_code))
 cell_8_code = """import os
 import torch
 import numpy as np
-from diffusers import DiffusionPipeline, AutoencoderKL
+from diffusers import AutoPipelineForText2Image, AutoencoderKL
 from PIL import Image
 import matplotlib.pyplot as plt
 
@@ -329,7 +329,7 @@ fixed_seed = 42
 
 print("Loading base model and VAE...")
 vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
-pipe = DiffusionPipeline.from_pretrained(
+pipe = AutoPipelineForText2Image.from_pretrained(
     "stabilityai/stable-diffusion-xl-base-1.0",
     vae=vae,
     torch_dtype=torch.float16,
